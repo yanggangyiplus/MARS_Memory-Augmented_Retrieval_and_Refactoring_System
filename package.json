@@ -20,6 +20,8 @@
     "intent"
   ],
   "activationEvents": [
+    "onView:mars.sidebarView",
+    "onView:mars.blastRadiusTree",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:javascript",

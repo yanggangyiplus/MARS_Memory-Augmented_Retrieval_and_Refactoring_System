@@ -35,3 +35,6 @@ coverage/
 
 # MARS data (local vector store, intent memory)
 .mars-data/
+
+.demo_video/
+demo_video/

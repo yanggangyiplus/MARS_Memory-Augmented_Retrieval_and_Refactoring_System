@@ -61,9 +61,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.postMessage({ type: 'modeChanged', data: this.modeManager.currentMode });
         break;
 
-      case 'requestIntentList':
-        this.postMessage({ type: 'intentList', data: this.intentStore.getAll() });
+      case 'requestIntentList': {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const list = this.intentStore.getAll();
+        const data = workspaceRoot
+          ? list.map((i) => this.toRelativePaths(i, workspaceRoot))
+          : list;
+        this.postMessage({ type: 'intentList', data });
         break;
+      }
 
       case 'analyzeBlastRadius':
         await this.handleAnalyzeBlastRadius(message.data);
@@ -77,15 +83,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await this.handleSearchIntents(message.data);
         break;
 
-      case 'approveIntent':
+      case 'approveIntent': {
         await this.expertMode.approve(message.data.intentId);
-        this.postMessage({ type: 'intentList', data: this.intentStore.getAll() });
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const list = this.intentStore.getAll();
+        const data = workspaceRoot ? list.map((i) => this.toRelativePaths(i, workspaceRoot)) : list;
+        this.postMessage({ type: 'intentList', data });
         break;
+      }
 
-      case 'revertIntent':
+      case 'revertIntent': {
         await this.expertMode.revert(message.data.intentId);
-        this.postMessage({ type: 'intentList', data: this.intentStore.getAll() });
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const list = this.intentStore.getAll();
+        const data = workspaceRoot ? list.map((i) => this.toRelativePaths(i, workspaceRoot)) : list;
+        this.postMessage({ type: 'intentList', data });
         break;
+      }
 
       case 'intentFeedback':
         await this.intentStore.recordFeedback(message.data.intentId, message.data.feedback);
@@ -95,6 +109,35 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await this.modeManager.toggle();
         break;
     }
+  }
+
+  /** 절대 경로를 워크스페이스 기준 상대 경로로 변환 (UI에 긴 폴더명이 안 보이도록) */
+  private toRelativePaths<T>(data: T, workspaceRoot: string): T {
+    const norm = (p: string) =>
+      p && p.startsWith(workspaceRoot)
+        ? path.relative(workspaceRoot, p).replace(/\\/g, '/')
+        : p;
+    const clone = JSON.parse(JSON.stringify(data)) as any;
+    if (clone.targetFile) clone.targetFile = norm(clone.targetFile);
+    if (clone.impactedFiles?.length) {
+      clone.impactedFiles = clone.impactedFiles.map((f: any) => ({
+        ...f,
+        path: norm(f.path),
+      }));
+    }
+    if (clone.dependencyChain?.length) {
+      clone.dependencyChain = clone.dependencyChain.map((e: any) => ({
+        ...e,
+        from: norm(e.from),
+        to: norm(e.to),
+      }));
+    }
+    if (clone.scope?.files) clone.scope.files = clone.scope.files.map((f: string) => norm(f));
+    if (clone.scope?.ranges?.length) {
+      clone.scope.ranges = clone.scope.ranges.map((r: any) => ({ ...r, file: norm(r.file) }));
+    }
+    if (clone.blastRadius) clone.blastRadius = this.toRelativePaths(clone.blastRadius, workspaceRoot);
+    return clone;
   }
 
   /** Blast Radius 분석 처리 */
@@ -116,7 +159,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       );
 
       const result = this.blastRadiusEngine.analyze(data.filePath, data.symbol);
-      this.postMessage({ type: 'blastRadiusResult', data: result });
+      const dataForWebview = this.toRelativePaths(result, workspaceRoot);
+      this.postMessage({ type: 'blastRadiusResult', data: dataForWebview });
     } catch (error) {
       this.postMessage({ type: 'error', data: `Blast Radius 분석 실패: ${error}` });
     }
@@ -138,15 +182,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       mode: this.modeManager.currentMode as 'beginner' | 'expert',
     };
 
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
     if (this.modeManager.currentMode === 'beginner') {
       const result = await this.beginnerMode.analyzeAndSuggest(input);
+      const intent = workspaceRoot ? this.toRelativePaths(result.intent, workspaceRoot) : result.intent;
+      const relatedIntents = (result.relatedIntents || []).map((r) => ({
+        ...r,
+        intent: workspaceRoot ? this.toRelativePaths(r.intent, workspaceRoot) : r.intent,
+      }));
       this.postMessage({
         type: 'intentCreated',
-        data: {
-          intent: result.intent,
-          relatedIntents: result.relatedIntents,
-          context: result.context,
-        },
+        data: { intent, relatedIntents, context: result.context },
       });
 
       if (result.suggestion) {
@@ -154,13 +201,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
     } else {
       const result = await this.expertMode.analyze(input);
+      const intent = workspaceRoot ? this.toRelativePaths(result.intent, workspaceRoot) : result.intent;
+      const relatedIntents = (result.relatedIntents || []).map((r) => ({
+        ...r,
+        intent: workspaceRoot ? this.toRelativePaths(r.intent, workspaceRoot) : r.intent,
+      }));
       this.postMessage({
         type: 'intentCreated',
-        data: {
-          intent: result.intent,
-          relatedIntents: result.relatedIntents,
-          context: result.context,
-        },
+        data: { intent, relatedIntents, context: result.context },
       });
     }
   }
@@ -168,7 +216,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   /** Intent 검색 처리 */
   private async handleSearchIntents(data: { query: string }): Promise<void> {
     const results = await this.ragPipeline.searchSimilarIntents(data.query);
-    this.postMessage({ type: 'searchResults', data: results });
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const dataForWebview = workspaceRoot
+      ? results.map((r) => ({ ...r, intent: this.toRelativePaths(r.intent, workspaceRoot) }))
+      : results;
+    this.postMessage({ type: 'searchResults', data: dataForWebview });
   }
 
   /** 모드 변경을 Webview에 알림 */
@@ -176,9 +228,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.postMessage({ type: 'modeChanged', data: mode });
   }
 
-  /** Blast Radius 결과를 Webview에 전송 */
+  /** Blast Radius 결과를 Webview에 전송 (경로는 상대 경로로 변환) */
   notifyBlastRadius(result: any): void {
-    this.postMessage({ type: 'blastRadiusResult', data: result });
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const data = workspaceRoot ? this.toRelativePaths(result, workspaceRoot) : result;
+    this.postMessage({ type: 'blastRadiusResult', data });
   }
 
   /** Extension → Webview 메시지 전송 */
